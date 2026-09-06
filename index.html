@@ -3,17 +3,30 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>無伺服器 P2P 排隊拎飛系統</title>
-  <!-- Tailwind CSS (簡化 UI 樣式) -->
+  <title>Firebase 雲端中轉排隊拎飛系統</title>
+  <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- PeerJS (P2P 直連庫) -->
-  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.min.js"></script>
-  <!-- QRCode.js (生成 QR Code) -->
+  <!-- QRCode.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-  <!-- HTML5-QRCode (掃描 QR Code) -->
+  <!-- HTML5-QRCode -->
   <script src="https://unpkg.com/html5-qrcode"></script>
+  <!-- Firebase App & Database (v9 Compatibility) -->
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
 </head>
 <body class="bg-slate-100 min-h-screen font-sans">
+
+  <script>
+    // 已自動為你帶入你的 Firebase Database URL
+    const FIREBASE_DB_URL = "https://hairticketing-default-rtdb.asia-southeast1.firebasedatabase.app/";
+
+    // 初始化 Firebase
+    let db = null;
+    if (FIREBASE_DB_URL) {
+      firebase.initializeApp({ databaseURL: FIREBASE_DB_URL });
+      db = firebase.database();
+    }
+  </script>
 
   <!-- 選擇角色頁面 -->
   <div id="role-select" class="max-w-md mx-auto pt-20 px-4 text-center">
@@ -36,16 +49,16 @@
       <div class="space-y-4">
         <div>
           <label class="block text-sm font-medium text-gray-700">鋪頭名稱</label>
-          <input type="text" id="store-name-input" value="好味餐廳" class="mt-1 block w-full border border-gray-300 rounded-md p-2">
+          <input type="text" id="store-name-input" value="" placeholder="請輸入鋪頭名稱" class="mt-1 block w-full border border-gray-300 rounded-md p-2">
         </div>
         <div class="grid grid-cols-2 gap-4">
           <div>
-            <label class="block text-sm font-medium text-gray-700">拎飛開始時間 (24h)</label>
-            <input type="time" id="start-time-input" value="11:00" class="mt-1 block w-full border border-gray-300 rounded-md p-2">
+            <label class="block text-sm font-medium text-gray-700">拎飛開始時間</label>
+            <input type="time" id="start-time-input" value="10:00" onchange="autoUpdateEndTime()" class="mt-1 block w-full border border-gray-300 rounded-md p-2">
           </div>
           <div>
-            <label class="block text-sm font-medium text-gray-700">拎飛結束時間 (24h)</label>
-            <input type="time" id="end-time-input" value="21:30" class="mt-1 block w-full border border-gray-300 rounded-md p-2">
+            <label class="block text-sm font-medium text-gray-700">拎飛結束時間</label>
+            <input type="time" id="end-time-input" value="20:00" class="mt-1 block w-full border border-gray-300 rounded-md p-2">
           </div>
         </div>
         <button onclick="saveStoreSettings()" class="w-full py-3 bg-blue-600 text-white font-bold rounded-lg shadow hover:bg-blue-700">
@@ -58,7 +71,7 @@
     <div id="store-dashboard" class="hidden space-y-6">
       <div class="bg-white p-6 rounded-2xl shadow-md text-center">
         <h2 id="display-store-name" class="text-2xl font-bold text-slate-800 mb-2"></h2>
-        <p id="peer-status" class="text-sm text-amber-600 mb-4">正在建立 P2P 連線通道...</p>
+        <p class="text-sm text-emerald-600 mb-4">🟢 雲端同步中 (客人可用 4G/5G 拎飛)</p>
         
         <!-- QR Code 顯示區 -->
         <div class="flex justify-center my-4">
@@ -152,13 +165,16 @@
     <div id="ticket-result-section" class="hidden bg-white p-6 rounded-2xl shadow-md text-center space-y-4">
       <h2 class="text-lg text-gray-600">拎飛成功！你的飛號為</h2>
       <div id="my-ticket-num" class="text-6xl font-black text-emerald-600 my-4">0000</div>
-      <p class="text-sm text-gray-500">請留意現場叫號，切勿關閉此網頁</p>
+      <div class="bg-slate-50 p-4 rounded-xl text-center">
+        <p class="text-xs text-gray-500">目前現場叫號</p>
+        <p id="cust-live-called-num" class="text-3xl font-bold text-blue-600">0000</p>
+      </div>
+      <p class="text-sm text-gray-500">請留意叫號更新，你可以離場等候</p>
     </div>
   </div>
 
   <script>
-    // 全域變數
-    let peer = null;
+    let storeId = '';
     let storeData = {
       storeName: '',
       startTime: '',
@@ -168,115 +184,97 @@
       lastResetDate: '',
       tickets: []
     };
-    let activeConnections = [];
-    let customerConn = null;
 
-    // 1. 初始化店家
+    function autoUpdateEndTime() {
+      const startVal = document.getElementById('start-time-input').value;
+      if (!startVal) return;
+      const [hours, minutes] = startVal.split(':').map(Number);
+      const endHours = (hours + 10) % 24;
+      document.getElementById('end-time-input').value = `${endHours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+    }
+
+    window.onload = function() {
+      const urlParams = new URLSearchParams(window.location.search);
+      const sid = urlParams.get('sid');
+      if (sid) {
+        initCustomerWithSid(sid);
+      }
+    };
+
     function initStore() {
       document.getElementById('role-select').classList.add('hidden');
       document.getElementById('store-ui').classList.remove('hidden');
       
-      // 載入 localStorage 資料
       const saved = localStorage.getItem('p2p_queue_store_data');
       if (saved) {
         storeData = JSON.parse(saved);
-        document.getElementById('store-name-input').value = storeData.storeName || '好味餐廳';
-        document.getElementById('start-time-input').value = storeData.startTime || '11:00';
-        document.getElementById('end-time-input').value = storeData.endTime || '21:30';
+        document.getElementById('store-name-input').value = storeData.storeName || '';
+        document.getElementById('start-time-input').value = storeData.startTime || '10:00';
+        document.getElementById('end-time-input').value = storeData.endTime || '20:00';
       }
+
+      let savedSid = localStorage.getItem('p2p_queue_store_id');
+      if (!savedSid) {
+        savedSid = 'store_' + Math.random().toString(36).substr(2, 9);
+        localStorage.setItem('p2p_queue_store_id', savedSid);
+      }
+      storeId = savedSid;
     }
 
-    // 儲存設定並啟動 PeerJS
     function saveStoreSettings() {
-      storeData.storeName = document.getElementById('store-name-input').value;
+      const nameInput = document.getElementById('store-name-input').value.trim();
+      if (!nameInput) {
+        alert('請輸入鋪頭名稱');
+        return;
+      }
+
+      storeData.storeName = nameInput;
       storeData.startTime = document.getElementById('start-time-input').value;
       storeData.endTime = document.getElementById('end-time-input').value;
       
       checkDailyReset();
-      saveToStorage();
+      syncToFirebase();
 
       document.getElementById('store-setup').classList.add('hidden');
       document.getElementById('store-dashboard').classList.remove('hidden');
       document.getElementById('display-store-name').innerText = storeData.storeName;
 
-      // 防止 iPad 螢幕變暗/鎖屏
       if ('wakeLock' in navigator) {
         navigator.wakeLock.request('screen').catch(()=>{});
       }
 
-      // 初始化 P2P Peer
-      peer = new Peer();
-      peer.on('open', (id) => {
-        document.getElementById('peer-status').innerText = '🟢 P2P 通道已建立，可以開始拎飛';
-        document.getElementById('peer-status').className = 'text-sm text-emerald-600 mb-4';
-        
-        // 生成包含 Peer ID 的 QR Code
-        const qrContainer = document.getElementById('qrcode-container');
-        qrContainer.innerHTML = '';
-        new QRCode(qrContainer, {
-          text: JSON.stringify({ peerId: id, storeName: storeData.storeName }),
-          width: 200,
-          height: 200
-        });
-      });
+      generateStoreQRCode();
 
-      // 監聽客人連線
-      peer.on('connection', (conn) => {
-        activeConnections.push(conn);
-        conn.on('data', (data) => handleCustomerMessage(conn, data));
-      });
-
-      renderDashboard();
-    }
-
-    // 處理客人傳來的訊息
-    function handleCustomerMessage(conn, data) {
-      if (data.type === 'INIT_REQ') {
-        checkDailyReset();
-        const isAllowed = isTimeAllowed(storeData.startTime, storeData.endTime);
-        const nextNum = calculateNextTicketNum(storeData.lastIssued);
-        
-        conn.send({
-          type: 'INIT_RES',
-          storeName: storeData.storeName,
-          isAllowed: isAllowed,
-          currentCalled: storeData.currentCalled,
-          nextNum: nextNum
-        });
-      } else if (data.type === 'TAKE_TICKET') {
-        checkDailyReset();
-        if (!isTimeAllowed(storeData.startTime, storeData.endTime)) {
-          conn.send({ type: 'ERROR', msg: '非拎飛時間' });
-          return;
+      // 即時監聽 Firebase 客人拎飛請求
+      db.ref('stores/' + storeId).on('value', (snapshot) => {
+        const val = snapshot.val();
+        if (val) {
+          storeData = val;
+          saveToLocalStorage();
+          renderDashboard();
         }
-
-        const newNum = calculateNextTicketNum(storeData.lastIssued);
-        storeData.lastIssued = newNum;
-        
-        const newTicket = {
-          ticketNum: newNum,
-          phone: data.phone,
-          partySize: data.partySize,
-          time: new Date().toLocaleTimeString('zh-HK', { hour12: false, hour: '2-digit', minute: '2-digit' }),
-          status: 'waiting'
-        };
-
-        storeData.tickets.push(newTicket);
-        saveToStorage();
-        renderDashboard();
-
-        conn.send({ type: 'TICKET_SUCCESS', ticketNum: newNum });
-      }
+      });
     }
 
-    // 計算下一個號碼 (0001 - 9999 循環)
+    function generateStoreQRCode() {
+      const baseUrl = window.location.href.split('?')[0];
+      const targetUrl = `${baseUrl}?sid=${storeId}`;
+
+      const qrContainer = document.getElementById('qrcode-container');
+      qrContainer.innerHTML = '';
+      new QRCode(qrContainer, {
+        text: targetUrl,
+        width: 200,
+        height: 200
+      });
+    }
+
     function calculateNextTicketNum(lastNum) {
-      let num = parseInt(lastNum, 10) + 1;
+      let num = parseInt(lastNum || '0', 10) + 1;
       if (num > 9999) num = 1;
       return num.toString().padStart(4, '0');
     }
 
-    // 檢查每日自動重置 (00:00 自動歸零)
     function checkDailyReset() {
       const today = new Date().toISOString().split('T')[0];
       if (storeData.lastResetDate !== today) {
@@ -284,11 +282,10 @@
         storeData.currentCalled = '0000';
         storeData.tickets = [];
         storeData.lastResetDate = today;
-        saveToStorage();
+        syncToFirebase();
       }
     }
 
-    // 時間檢查 (24小時制)
     function isTimeAllowed(start, end) {
       const now = new Date();
       const currentMin = now.getHours() * 60 + now.getMinutes();
@@ -297,15 +294,14 @@
       const startMin = sH * 60 + sM;
       const endMin = eH * 60 + eM;
 
-      if (endMin < startMin) { // 跨夜
+      if (endMin < startMin) {
         return currentMin >= startMin || currentMin <= endMin;
       }
       return currentMin >= startMin && currentMin <= endMin;
     }
 
-    // 叫下一個號碼
     function nextTicket() {
-      const waitingTickets = storeData.tickets.filter(t => t.status === 'waiting');
+      const waitingTickets = (storeData.tickets || []).filter(t => t.status === 'waiting');
       if (waitingTickets.length > 0) {
         const next = waitingTickets[0];
         next.status = 'called';
@@ -313,18 +309,24 @@
       } else {
         storeData.currentCalled = calculateNextTicketNum(storeData.currentCalled);
       }
-      saveToStorage();
-      renderDashboard();
+      syncToFirebase();
     }
 
-    function saveToStorage() {
+    function saveToLocalStorage() {
       localStorage.setItem('p2p_queue_store_data', JSON.stringify(storeData));
     }
 
+    function syncToFirebase() {
+      saveToLocalStorage();
+      if (db && storeId) {
+        db.ref('stores/' + storeId).set(storeData);
+      }
+    }
+
     function renderDashboard() {
-      document.getElementById('current-called-num').innerText = storeData.currentCalled;
+      document.getElementById('current-called-num').innerText = storeData.currentCalled || '0000';
       const listElem = document.getElementById('ticket-list');
-      listElem.innerHTML = storeData.tickets.map(t => `
+      listElem.innerHTML = (storeData.tickets || []).map(t => `
         <tr class="${t.status === 'called' ? 'bg-blue-50 font-bold' : ''}">
           <td class="py-3 text-lg text-blue-600">${t.ticketNum}</td>
           <td class="py-3">${t.partySize} 人</td>
@@ -341,53 +343,41 @@
 
       const html5QrcodeScanner = new Html5QrcodeScanner("qr-reader", { fps: 10, qrbox: 250 });
       html5QrcodeScanner.render((decodedText) => {
-        try {
-          const data = JSON.parse(decodedText);
-          if (data.peerId) {
-            html5QrcodeScanner.clear();
-            connectToStore(data.peerId);
+        html5QrcodeScanner.clear();
+        window.location.href = decodedText;
+      });
+    }
+
+    function initCustomerWithSid(sid) {
+      storeId = sid;
+      document.getElementById('role-select').classList.add('hidden');
+      document.getElementById('customer-ui').classList.remove('hidden');
+      document.getElementById('scanner-section').classList.add('hidden');
+      document.getElementById('ticket-form-section').classList.remove('hidden');
+
+      // 即時同步店家狀態
+      db.ref('stores/' + storeId).on('value', (snapshot) => {
+        const sData = snapshot.val();
+        if (sData) {
+          document.getElementById('cust-store-name').innerText = sData.storeName;
+          document.getElementById('cust-current-num').innerText = sData.currentCalled || '0000';
+          document.getElementById('cust-live-called-num').innerText = sData.currentCalled || '0000';
+          document.getElementById('cust-next-num').innerText = calculateNextTicketNum(sData.lastIssued || '0000');
+
+          const allowed = isTimeAllowed(sData.startTime, sData.endTime);
+          if (!allowed) {
+            document.getElementById('closed-msg').classList.remove('hidden');
+            document.getElementById('form-body').classList.add('hidden');
+          } else {
+            document.getElementById('closed-msg').classList.add('hidden');
+            document.getElementById('form-body').classList.remove('hidden');
           }
-        } catch(e) {
-          alert('無效的店家 QR Code');
         }
       });
     }
 
-    function connectToStore(peerId) {
-      document.getElementById('scanner-section').classList.add('hidden');
-      document.getElementById('ticket-form-section').classList.remove('hidden');
-
-      peer = new Peer();
-      peer.on('open', () => {
-        customerConn = peer.connect(peerId);
-        
-        customerConn.on('open', () => {
-          customerConn.send({ type: 'INIT_REQ' });
-        });
-
-        customerConn.on('data', (data) => {
-          if (data.type === 'INIT_RES') {
-            document.getElementById('cust-store-name').innerText = data.storeName;
-            document.getElementById('cust-current-num').innerText = data.currentCalled;
-            document.getElementById('cust-next-num').innerText = data.nextNum;
-
-            if (!data.isAllowed) {
-              document.getElementById('closed-msg').classList.remove('hidden');
-              document.getElementById('form-body').classList.add('hidden');
-            }
-          } else if (data.type === 'TICKET_SUCCESS') {
-            document.getElementById('ticket-form-section').classList.add('hidden');
-            document.getElementById('ticket-result-section').classList.remove('hidden');
-            document.getElementById('my-ticket-num').innerText = data.ticketNum;
-          } else if (data.type === 'ERROR') {
-            alert(data.msg);
-          }
-        });
-      });
-    }
-
     function submitTakeTicket() {
-      const phone = document.getElementById('cust-phone').value;
+      const phone = document.getElementById('cust-phone').value.trim();
       const partySize = document.getElementById('party-size').value;
 
       if (!phone || phone.length < 8) {
@@ -395,10 +385,35 @@
         return;
       }
 
-      customerConn.send({
-        type: 'TAKE_TICKET',
-        phone: phone,
-        partySize: partySize
+      db.ref('stores/' + storeId).transaction((current) => {
+        if (!current) return current;
+
+        const allowed = isTimeAllowed(current.startTime, current.endTime);
+        if (!allowed) return;
+
+        const newNum = calculateNextTicketNum(current.lastIssued || '0000');
+        current.lastIssued = newNum;
+
+        if (!current.tickets) current.tickets = [];
+        current.tickets.push({
+          ticketNum: newNum,
+          phone: phone,
+          partySize: partySize,
+          time: new Date().toLocaleTimeString('zh-HK', { hour12: false, hour: '2-digit', minute: '2-digit' }),
+          status: 'waiting'
+        });
+
+        return current;
+      }, (error, committed, snapshot) => {
+        if (committed) {
+          const val = snapshot.val();
+          const newIssued = val.lastIssued;
+          document.getElementById('ticket-form-section').classList.add('hidden');
+          document.getElementById('ticket-result-section').classList.remove('hidden');
+          document.getElementById('my-ticket-num').innerText = newIssued;
+        } else {
+          alert('拎飛失敗，可能目前非營業拎飛時間');
+        }
       });
     }
   </script>
