@@ -96,7 +96,7 @@
 
       <!-- 等候清單 -->
       <div class="bg-white p-6 rounded-2xl shadow-md">
-        <h3 class="text-lg font-bold mb-4 text-slate-800">📋 等候中清單</h3>
+        <h3 class="text-lg font-bold mb-4 text-slate-800">📋 等候中清單 (只顯示當日)</h3>
         <div class="overflow-x-auto">
           <table class="w-full text-left">
             <thead>
@@ -193,6 +193,16 @@
       tickets: []
     };
 
+    function getTodayStr() {
+      return new Date().toISOString().split('T')[0];
+    }
+
+    function getYesterdayStr() {
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      return yesterday.toISOString().split('T')[0];
+    }
+
     function maskPhoneNumber(phone) {
       if (!phone || phone.length < 8) return phone;
       return '******' + phone.slice(-2);
@@ -247,7 +257,7 @@
           endTime: '20:00',
           currentCalled: '0000',
           lastIssued: '0000',
-          lastResetDate: new Date().toISOString().split('T')[0],
+          lastResetDate: getTodayStr(),
           tickets: []
         };
         document.getElementById('store-name-input').value = '';
@@ -266,7 +276,7 @@
       storeData.startTime = document.getElementById('start-time-input').value;
       storeData.endTime = document.getElementById('end-time-input').value;
       
-      checkDailyReset();
+      checkDailyResetAndPurge();
       syncToFirebase();
 
       document.getElementById('store-setup').classList.add('hidden');
@@ -283,6 +293,7 @@
         const val = snapshot.val();
         if (val) {
           storeData = val;
+          checkDailyResetAndPurge();
           saveToLocalStorage();
           renderDashboard();
         }
@@ -308,14 +319,23 @@
       return num.toString().padStart(4, '0');
     }
 
-    function checkDailyReset() {
-      const today = new Date().toISOString().split('T')[0];
+    // 關鍵修改：只保留當日 (Today) 與前一日 (Yesterday) 的資料，其餘刪除
+    function checkDailyResetAndPurge() {
+      const today = getTodayStr();
+      const yesterday = getYesterdayStr();
+
+      // 1. 如果跨日，重置今日叫號號碼
       if (storeData.lastResetDate !== today) {
         storeData.lastIssued = '0000';
         storeData.currentCalled = '0000';
-        storeData.tickets = [];
         storeData.lastResetDate = today;
-        syncToFirebase();
+      }
+
+      // 2. 自動 Data Purge：只保留今天和昨天的 tickets
+      if (storeData.tickets && Array.isArray(storeData.tickets)) {
+        storeData.tickets = storeData.tickets.filter(t => t.date === today || t.date === yesterday);
+      } else {
+        storeData.tickets = [];
       }
     }
 
@@ -334,7 +354,9 @@
     }
 
     function nextTicket() {
-      const waitingTickets = (storeData.tickets || []).filter(t => t.status === 'waiting');
+      const today = getTodayStr();
+      // 叫號只針對「今天」的等候中客人
+      const waitingTickets = (storeData.tickets || []).filter(t => t.status === 'waiting' && t.date === today);
       if (waitingTickets.length > 0) {
         const next = waitingTickets[0];
         next.status = 'called';
@@ -357,9 +379,14 @@
     }
 
     function renderDashboard() {
+      const today = getTodayStr();
       document.getElementById('current-called-num').innerText = storeData.currentCalled || '0000';
       const listElem = document.getElementById('ticket-list');
-      listElem.innerHTML = (storeData.tickets || []).map(t => `
+      
+      // 店家清單只顯示「今天」的飛
+      const todayTickets = (storeData.tickets || []).filter(t => t.date === today);
+
+      listElem.innerHTML = todayTickets.map(t => `
         <tr class="${t.status === 'called' ? 'bg-blue-50 font-bold' : ''}">
           <td class="py-3 text-lg text-blue-600">${t.ticketNum}</td>
           <td class="py-3">${t.name || '-'}</td>
@@ -388,11 +415,10 @@
       document.getElementById('customer-ui').classList.remove('hidden');
       document.getElementById('scanner-section').classList.add('hidden');
 
-      const today = new Date().toISOString().split('T')[0];
+      const today = getTodayStr();
       const savedDate = localStorage.getItem('my_ticket_date_' + storeId);
       const savedTicket = localStorage.getItem('my_ticket_' + storeId);
 
-      // 只有當「同一天」且「有舊飛號」時才顯示舊飛；過日自動清除舊飛
       if (savedDate === today && savedTicket) {
         showCustomerTicket(savedTicket);
       } else {
@@ -447,11 +473,14 @@
         current.lastIssued = newNum;
 
         if (!current.tickets) current.tickets = [];
+        
+        // 寫入資料時加上 date 欄位，供 Data Purging 過濾使用
         current.tickets.push({
           ticketNum: newNum,
           name: name,
           phone: phone,
           partySize: partySize,
+          date: getTodayStr(),
           time: new Date().toLocaleTimeString('zh-HK', { hour12: false, hour: '2-digit', minute: '2-digit' }),
           status: 'waiting'
         });
@@ -461,9 +490,8 @@
         if (committed) {
           const val = snapshot.val();
           const newIssued = val.lastIssued;
-          const today = new Date().toISOString().split('T')[0];
+          const today = getTodayStr();
           
-          // 儲存飛號與當日日期到客人手機瀏覽器
           localStorage.setItem('my_ticket_' + storeId, newIssued);
           localStorage.setItem('my_ticket_date_' + storeId, today);
           
